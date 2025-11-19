@@ -257,6 +257,34 @@ class LightNovelScraper:
             logger.error(f"Error extracting novel details: {e}")
             return None
     
+    def is_novel_complete(self, novel_slug):
+        """Check if novel already has all chapters"""
+        filename = f'data/novels/{novel_slug}.json'
+        if not os.path.exists(filename):
+            return False
+        
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Check if novel is marked as complete
+            if data.get('metadata', {}).get('is_complete'):
+                return True
+            
+            # Check if chapters count matches expected
+            chapters = data.get('chapters', [])
+            novel_info = data.get('novel_info', {})
+            expected_chapters = novel_info.get('chapters_count')
+            
+            if expected_chapters and len(chapters) >= expected_chapters:
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking novel completeness for {novel_slug}: {e}")
+            return False
+    
     def get_all_chapters_for_novel(self, novel_slug, existing_data=None):
         """Get ALL chapters for a novel with content - WITH DIRECT SAVING"""
         all_new_chapters = []
@@ -308,6 +336,11 @@ class LightNovelScraper:
             except Exception as e:
                 logger.error(f"❌ Error fetching chapters page {page} for {novel_slug}: {e}")
                 break
+        
+        # If no new chapters, return existing ones
+        if not all_chapter_urls:
+            logger.info(f"📭 No new chapters found for {novel_slug}")
+            return self.sort_chapters(existing_chapters)
         
         logger.info(f"🎯 Starting to process {len(all_chapter_urls)} new chapters for {novel_slug}")
         
@@ -614,7 +647,7 @@ class LightNovelScraper:
         return text
     
     def scrape_all_novels_complete(self, start_page=1, max_pages=1):
-        """MAIN METHOD: Scrape ALL novels with ALL chapters - IMPROVED SAVING"""
+        """MAIN METHOD: Scrape ALL novels with ALL chapters - FIXED RESUME LOGIC"""
         logger.info(f"🚀 STARTING COMPLETE SCRAPING: Pages {start_page} to {max_pages}")
         
         # Step 1: Get novel list from website
@@ -635,69 +668,68 @@ class LightNovelScraper:
         existing_novels_list = self.load_existing_novels_list()
         updated_novels_list = existing_novels_list.copy()
         
-        # Step 3: FIRST PASS - Get novel details and SAVE to novels.json
-        logger.info("🎯 STEP 1: Getting novel details and saving to novels.json")
+        # Step 3: Process each novel - CHECK COMPLETENESS FIRST
+        novels_to_process = []
         
-        novel_details_list = []
         for i, novel in enumerate(novels, 1):
             novel_slug = novel['slug']
             novel_title = novel['title']
             
-            logger.info(f"🔍 Getting details for novel {i}/{len(novels)}: {novel_title}")
-            
-            # Skip if already exists in list
-            if any(n.get('slug') == novel_slug for n in updated_novels_list):
-                logger.info(f"⏭️ Novel already in list: {novel_title}")
+            # Check if novel is already complete
+            if self.is_novel_complete(novel_slug):
+                logger.info(f"✅ Novel already complete: {novel_title}")
+                # Still add to updated list to ensure it's included
+                updated_novels_list = self.update_novel_in_list(updated_novels_list, novel)
                 continue
             
-            # Get detailed novel info
+            logger.info(f"🎯 Novel needs processing: {novel_title}")
+            novels_to_process.append(novel)
+        
+        logger.info(f"📊 Processing summary: {len(novels_to_process)} novels need chapters")
+        
+        if not novels_to_process:
+            logger.info("🎉 All novels are already complete!")
+            self.save_novels_to_json(updated_novels_list)
+            return updated_novels_list
+        
+        # Step 4: Process novels that need chapters
+        processed_count = 0
+        for i, novel in enumerate(novels_to_process, 1):
+            novel_slug = novel['slug']
+            novel_title = novel['title']
+            
+            logger.info(f"📖 Processing novel {i}/{len(novels_to_process)}: {novel_title}")
+            
+            # Get detailed novel info (always refresh details)
             detail = self.get_novel_detail(novel_slug)
             if detail:
                 novel_data = {**novel, **detail}
             else:
                 novel_data = novel
             
-            novel_details_list.append(novel_data)
-            
-            # ✅ SAVE 1: Update novels list IMMEDIATELY after getting details
+            # Update novels list with fresh data
             updated_novels_list = self.update_novel_in_list(updated_novels_list, novel_data)
             self.save_novels_to_json(updated_novels_list)
             
-            logger.info(f"✅ Saved novel info: {novel_title}")
-            
-            # Short delay between novel detail requests
-            if i < len(novels):
-                time.sleep(2)
-        
-        logger.info("🎯 STEP 2: Now processing chapters for each novel")
-        
-        # Step 4: SECOND PASS - Process chapters for each novel
-        for i, novel_data in enumerate(novel_details_list, 1):
-            novel_slug = novel_data['slug']
-            novel_title = novel_data['title']
-            
-            logger.info(f"📖 Processing chapters for novel {i}/{len(novel_details_list)}: {novel_title}")
-            
-            # Load existing novel data (if any)
+            # Load existing novel data for chapters
             existing_data = self.load_existing_novel(novel_slug)
             
             # Get ALL chapters
             all_chapters = self.get_all_chapters_for_novel(novel_slug, existing_data)
             
-            # ✅ SAVE 2: Save complete novel data with chapters
+            # Save complete novel data
             self.save_complete_novel_to_json(novel_data, all_chapters)
             
+            processed_count += 1
             logger.info(f"✅ COMPLETED: {novel_title} ({len(all_chapters)} chapters)")
-            
-            # Progress update
-            logger.info(f"📊 Overall progress: {i}/{len(novel_details_list)} novels completed")
+            logger.info(f"📊 Progress: {processed_count}/{len(novels_to_process)} novels completed")
             
             # Delay between novels
-            if i < len(novel_details_list):
+            if i < len(novels_to_process):
                 logger.info("⏳ Waiting 5 seconds before next novel...")
                 time.sleep(5)
         
-        logger.info(f"🎉 SCRAPING COMPLETED! Processed {len(novel_details_list)} novels")
+        logger.info(f"🎉 SCRAPING COMPLETED! Processed {processed_count} novels")
         return updated_novels_list
 
 def main():
@@ -708,11 +740,10 @@ def main():
     START_PAGE = 1
     MAX_PAGES = 1
     
-    print("🚀 Light Novel Scraper - TWO-PASS SAVING")
-    print("=========================================")
+    print("🚀 Light Novel Scraper - SMART RESUME")
+    print("=====================================")
     print(f"📄 Pages: {START_PAGE} to {MAX_PAGES}")
-    print("🎯 Step 1: Save novel details to novels.json")
-    print("🎯 Step 2: Process chapters and save to individual files") 
+    print("🎯 Will only process novels that need chapters")
     print("⏰ This may take a while...")
     print()
     
@@ -724,7 +755,7 @@ def main():
     print()
     print("📊 SCRAPING SUMMARY")
     print("===================")
-    print(f"✅ Total novels processed: {len(novels)}")
+    print(f"✅ Total novels in list: {len(novels)}")
     print("💾 novels.json: Contains all novel details")
     print("💾 data/novels/: Contains complete novel data with chapters")
     print("🎉 All done!")
