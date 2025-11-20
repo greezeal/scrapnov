@@ -159,7 +159,7 @@ class LightNovelScraper:
             logger.error(f"Error extracting novel info: {e}")
             return None
     
-    def get_novel_detail(self, novel_slug, existing_data=None):
+    def get_novel_detail(self, novel_slug):
         """Get detailed information for a specific novel"""
         url = f"{self.base_url}/novel/{novel_slug}/"
         logger.info(f"🔍 Fetching novel details: {novel_slug}")
@@ -171,21 +171,6 @@ class LightNovelScraper:
             
             detail_info = self.extract_novel_detail(soup, novel_slug)
             if detail_info:
-                # ✅ PERBAIKAN: Preserve rating dari data existing jika tidak ditemukan di detail
-                if existing_data and 'novel_info' in existing_data:
-                    # Jika rating di detail null, gunakan rating dari existing data
-                    if detail_info.get('rating') is None and existing_data['novel_info'].get('rating') is not None:
-                        detail_info['rating'] = existing_data['novel_info']['rating']
-                        logger.info(f"🔄 Using existing rating: {detail_info['rating']} for {novel_slug}")
-                    
-                    # Preserve first_scraped timestamp
-                    if 'first_scraped' in existing_data['novel_info']:
-                        detail_info['first_scraped'] = existing_data['novel_info']['first_scraped']
-                
-                # Jika masih belum ada first_scraped, set sekarang
-                if 'first_scraped' not in detail_info:
-                    detail_info['first_scraped'] = self.get_current_timestamp()
-                
                 detail_info['last_updated'] = self.get_current_timestamp()
                 detail_info['scraped_at'] = self.get_current_timestamp()
             return detail_info
@@ -236,7 +221,6 @@ class LightNovelScraper:
             
             # ✅ PERBAIKAN: Extract rating dengan selector yang benar
             rating = None
-            rank = None
             
             # Method 1: Cari di .rating-number (paling spesifik)
             rating_number_elem = soup.select_one('.rating-number')
@@ -279,6 +263,7 @@ class LightNovelScraper:
                 logger.warning(f"❌ No rating found for {novel_slug}")
             
             rank_elem = soup.select_one('.rank-badge')
+            rank = None
             if rank_elem:
                 rank_text = rank_elem.get_text(strip=True)
                 rank_match = re.search(r'RANK\s*(\d+)', rank_text)
@@ -307,7 +292,7 @@ class LightNovelScraper:
             return None
     
     def is_novel_complete(self, novel_slug):
-        """Check if novel already has all chapters"""
+        """Check if novel already has all chapters AND has complete data"""
         filename = f'data/novels/{novel_slug}.json'
         if not os.path.exists(filename):
             return False
@@ -316,13 +301,18 @@ class LightNovelScraper:
             with open(filename, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             
+            # ✅ PERBAIKAN: Jangan consider complete jika rating null
+            novel_info = data.get('novel_info', {})
+            if novel_info.get('rating') is None:
+                logger.info(f"📝 Novel {novel_slug} has null rating, needs update")
+                return False
+            
             # Check if novel is marked as complete
             if data.get('metadata', {}).get('is_complete'):
                 return True
             
             # Check if chapters count matches expected
             chapters = data.get('chapters', [])
-            novel_info = data.get('novel_info', {})
             expected_chapters = novel_info.get('chapters_count')
             
             if expected_chapters and len(chapters) >= expected_chapters:
@@ -333,6 +323,51 @@ class LightNovelScraper:
         except Exception as e:
             logger.error(f"Error checking novel completeness for {novel_slug}: {e}")
             return False
+    
+    def save_novel_info_first(self, novel_data, filename=None):
+        """✅ BARU: Save novel info FIRST before processing chapters"""
+        if filename is None:
+            filename = f'data/novels/{novel_data["slug"]}.json'
+        
+        try:
+            # Load existing data jika ada
+            existing_data = self.load_existing_novel(novel_data['slug'])
+            existing_chapters = existing_data.get('chapters', []) if existing_data else []
+            
+            # Merge novel_info dengan existing data
+            if existing_data and 'novel_info' in existing_data:
+                # Preserve rating dari existing jika tidak ada di novel_data
+                if novel_data.get('rating') is None and existing_data['novel_info'].get('rating') is not None:
+                    novel_data['rating'] = existing_data['novel_info']['rating']
+                    logger.info(f"🔄 Using existing rating: {novel_data['rating']}")
+                
+                # Preserve first_scraped
+                if 'first_scraped' in existing_data['novel_info']:
+                    novel_data['first_scraped'] = existing_data['novel_info']['first_scraped']
+            
+            complete_data = {
+                'metadata': {
+                    'scraped_at': self.get_current_timestamp(),
+                    'total_chapters': len(existing_chapters),
+                    'novel_slug': novel_data['slug'],
+                    'novel_title': novel_data['title'],
+                    'first_scraped': novel_data.get('first_scraped', self.get_current_timestamp()),
+                    'last_updated': self.get_current_timestamp(),
+                    'is_partial': True,
+                    'has_novel_info': True,
+                    'has_chapters': len(existing_chapters) > 0
+                },
+                'novel_info': novel_data,
+                'chapters': existing_chapters
+            }
+            
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(complete_data, f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"💾 SAVED NOVEL INFO FIRST: {filename} (rating: {novel_data.get('rating')})")
+            
+        except Exception as e:
+            logger.error(f"❌ Error saving novel info first: {e}")
     
     def get_all_chapters_for_novel(self, novel_slug, existing_data=None):
         """Get ALL chapters for a novel with content - WITH DIRECT SAVING"""
@@ -451,8 +486,8 @@ class LightNovelScraper:
             existing_chapters = existing_data.get('chapters', []) if existing_data else []
             current_merged = self.merge_chapters(existing_chapters, new_chapters)
             
-            # Get novel info from existing data atau gunakan data baru
-            novel_info = existing_data.get('novel_info', {}) if existing_data else {}
+            # Get novel info dari existing data (harusnya sudah ada sejak awal)
+            novel_info = existing_data.get('novel_info', {}) if existing_data else {'slug': novel_slug}
             
             # Create partial data structure
             partial_data = {
@@ -461,9 +496,11 @@ class LightNovelScraper:
                     'total_chapters': len(current_merged),
                     'novel_slug': novel_slug,
                     'current_progress': f"{current_index} chapters processed",
-                    'is_partial_save': True
+                    'is_partial_save': True,
+                    'has_novel_info': 'title' in novel_info,
+                    'has_chapters': len(current_merged) > 0
                 },
-                'novel_info': novel_info,
+                'novel_info': novel_info,  # ✅ SELALU include novel_info
                 'chapters': current_merged
             }
             
@@ -471,7 +508,7 @@ class LightNovelScraper:
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(partial_data, f, ensure_ascii=False, indent=2)
             
-            logger.info(f"💾 DIRECT SAVE: {novel_slug} - {len(current_merged)} chapters ({processed_count}/{current_index} processed)")
+            logger.info(f"💾 DIRECT SAVE: {novel_slug} - {len(current_merged)} chapters, rating: {novel_info.get('rating')}")
             
         except Exception as e:
             logger.error(f"❌ Error in partial save: {e}")
@@ -677,13 +714,13 @@ class LightNovelScraper:
                     'last_updated': self.get_current_timestamp(),
                     'is_complete': True
                 },
-                'novel_info': novel_data,
+                'novel_info': novel_data,  # ✅ SELALU include novel_info lengkap
                 'chapters': chapters_with_content
             }
             
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(complete_data, f, ensure_ascii=False, indent=2)
-            logger.info(f"💾 FINAL SAVE: {filename} ({len(chapters_with_content)} chapters)")
+            logger.info(f"💾 FINAL SAVE: {filename} ({len(chapters_with_content)} chapters, rating: {novel_data.get('rating')})")
             
         except Exception as e:
             logger.error(f"❌ Error saving complete novel to JSON: {e}")
@@ -696,7 +733,7 @@ class LightNovelScraper:
         return text
     
     def scrape_all_novels_complete(self, start_page=1, max_pages=1):
-        """MAIN METHOD: Scrape ALL novels with ALL chapters - FIXED RESUME LOGIC"""
+        """MAIN METHOD: Scrape ALL novels with ALL chapters - FIXED PROCESS ORDER"""
         logger.info(f"🚀 STARTING COMPLETE SCRAPING: Pages {start_page} to {max_pages}")
         
         # Step 1: Get novel list from website
@@ -724,24 +761,23 @@ class LightNovelScraper:
             novel_slug = novel['slug']
             novel_title = novel['title']
             
-            # Check if novel is already complete
+            # Check if novel is already complete (dengan rating)
             if self.is_novel_complete(novel_slug):
                 logger.info(f"✅ Novel already complete: {novel_title}")
-                # Still add to updated list to ensure it's included
                 updated_novels_list = self.update_novel_in_list(updated_novels_list, novel)
                 continue
             
             logger.info(f"🎯 Novel needs processing: {novel_title}")
             novels_to_process.append(novel)
         
-        logger.info(f"📊 Processing summary: {len(novels_to_process)} novels need chapters")
+        logger.info(f"📊 Processing summary: {len(novels_to_process)} novels need processing")
         
         if not novels_to_process:
             logger.info("🎉 All novels are already complete!")
             self.save_novels_to_json(updated_novels_list)
             return updated_novels_list
         
-        # Step 4: Process novels that need chapters
+        # Step 4: Process novels that need updates
         processed_count = 0
         for i, novel in enumerate(novels_to_process, 1):
             novel_slug = novel['slug']
@@ -749,17 +785,20 @@ class LightNovelScraper:
             
             logger.info(f"📖 Processing novel {i}/{len(novels_to_process)}: {novel_title}")
             
-            # Load existing novel data untuk mendapatkan rating yang sudah ada
+            # Load existing novel data
             existing_data = self.load_existing_novel(novel_slug)
             
             # Get detailed novel info (always refresh details)
-            detail = self.get_novel_detail(novel_slug, existing_data)
+            detail = self.get_novel_detail(novel_slug)
             if detail:
                 novel_data = {**novel, **detail}
             else:
                 novel_data = novel
             
-            # Update novels list with fresh data
+            # ✅ PERBAIKAN: SAVE NOVEL INFO FIRST sebelum proses chapters
+            self.save_novel_info_first(novel_data)
+            
+            # Update novels list dengan fresh data
             updated_novels_list = self.update_novel_in_list(updated_novels_list, novel_data)
             self.save_novels_to_json(updated_novels_list)
             
@@ -770,7 +809,7 @@ class LightNovelScraper:
             self.save_complete_novel_to_json(novel_data, all_chapters)
             
             processed_count += 1
-            logger.info(f"✅ COMPLETED: {novel_title} ({len(all_chapters)} chapters)")
+            logger.info(f"✅ COMPLETED: {novel_title} ({len(all_chapters)} chapters, rating: {novel_data.get('rating')})")
             logger.info(f"📊 Progress: {processed_count}/{len(novels_to_process)} novels completed")
             
             # Delay between novels
@@ -789,10 +828,11 @@ def main():
     START_PAGE = 1
     MAX_PAGES = 1
     
-    print("🚀 Light Novel Scraper - FIXED RATING VERSION")
-    print("=============================================")
+    print("🚀 Light Novel Scraper - FIXED RATING & PROCESS ORDER")
+    print("====================================================")
     print(f"📄 Pages: {START_PAGE} to {MAX_PAGES}")
-    print("🎯 Fixed rating extraction for detail pages")
+    print("🎯 Novel info saved FIRST, then chapters")
+    print("🎯 Fixed rating extraction and preservation")
     print("⏰ This may take a while...")
     print()
     
