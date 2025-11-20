@@ -159,7 +159,7 @@ class LightNovelScraper:
             logger.error(f"Error extracting novel info: {e}")
             return None
     
-    def get_novel_detail(self, novel_slug):
+    def get_novel_detail(self, novel_slug, existing_data=None):
         """Get detailed information for a specific novel"""
         url = f"{self.base_url}/novel/{novel_slug}/"
         logger.info(f"🔍 Fetching novel details: {novel_slug}")
@@ -171,6 +171,21 @@ class LightNovelScraper:
             
             detail_info = self.extract_novel_detail(soup, novel_slug)
             if detail_info:
+                # ✅ PERBAIKAN: Preserve rating dari data existing jika tidak ditemukan di detail
+                if existing_data and 'novel_info' in existing_data:
+                    # Jika rating di detail null, gunakan rating dari existing data
+                    if detail_info.get('rating') is None and existing_data['novel_info'].get('rating') is not None:
+                        detail_info['rating'] = existing_data['novel_info']['rating']
+                        logger.info(f"🔄 Using existing rating: {detail_info['rating']} for {novel_slug}")
+                    
+                    # Preserve first_scraped timestamp
+                    if 'first_scraped' in existing_data['novel_info']:
+                        detail_info['first_scraped'] = existing_data['novel_info']['first_scraped']
+                
+                # Jika masih belum ada first_scraped, set sekarang
+                if 'first_scraped' not in detail_info:
+                    detail_info['first_scraped'] = self.get_current_timestamp()
+                
                 detail_info['last_updated'] = self.get_current_timestamp()
                 detail_info['scraped_at'] = self.get_current_timestamp()
             return detail_info
@@ -180,7 +195,7 @@ class LightNovelScraper:
             return None
     
     def extract_novel_detail(self, soup, novel_slug):
-        """Extract detailed novel information"""
+        """Extract detailed novel information - FIXED RATING EXTRACTION"""
         try:
             title_elem = soup.select_one('.novel-title')
             title = title_elem.get_text(strip=True) if title_elem else None
@@ -219,15 +234,49 @@ class LightNovelScraper:
             summary_elem = soup.select_one('.summary-content')
             summary = summary_elem.get_text(strip=True) if summary_elem else None
             
+            # ✅ PERBAIKAN: Extract rating dengan selector yang benar
             rating = None
             rank = None
             
-            rating_elem = soup.select_one('.card-rating')
-            if rating_elem:
-                rating_text = rating_elem.get_text(strip=True)
-                rating_match = re.search(r'★\s*([\d.]+)', rating_text)
-                if rating_match:
-                    rating = float(rating_match.group(1))
+            # Method 1: Cari di .rating-number (paling spesifik)
+            rating_number_elem = soup.select_one('.rating-number')
+            if rating_number_elem:
+                rating_text = rating_number_elem.get_text(strip=True)
+                try:
+                    rating = float(rating_text)
+                    logger.info(f"✅ Found rating from .rating-number: {rating}")
+                except ValueError:
+                    logger.warning(f"⚠️ Could not convert rating text: {rating_text}")
+            
+            # Method 2: Cari di .star-rating (parent element)
+            if rating is None:
+                rating_elem = soup.select_one('.star-rating')
+                if rating_elem:
+                    rating_text = rating_elem.get_text(strip=True)
+                    # Contoh teks: "★★★★★5.00" - ambil angka di akhir
+                    rating_match = re.search(r'([\d.]+)$', rating_text.strip())
+                    if rating_match:
+                        try:
+                            rating = float(rating_match.group(1))
+                            logger.info(f"✅ Found rating from .star-rating: {rating}")
+                        except ValueError:
+                            logger.warning(f"⚠️ Could not convert rating text: {rating_text}")
+            
+            # Method 3: Cari di .card-rating (fallback format lama)
+            if rating is None:
+                rating_elem = soup.select_one('.card-rating')
+                if rating_elem:
+                    rating_text = rating_elem.get_text(strip=True)
+                    rating_match = re.search(r'★\s*([\d.]+)', rating_text)
+                    if rating_match:
+                        try:
+                            rating = float(rating_match.group(1))
+                            logger.info(f"✅ Found rating from .card-rating: {rating}")
+                        except ValueError:
+                            logger.warning(f"⚠️ Could not convert rating text: {rating_text}")
+            
+            if rating is None:
+                logger.warning(f"❌ No rating found for {novel_slug}")
             
             rank_elem = soup.select_one('.rank-badge')
             if rank_elem:
@@ -402,8 +451,8 @@ class LightNovelScraper:
             existing_chapters = existing_data.get('chapters', []) if existing_data else []
             current_merged = self.merge_chapters(existing_chapters, new_chapters)
             
-            # Get novel info from existing data or create basic one
-            novel_info = existing_data.get('novel_info', {}) if existing_data else {'slug': novel_slug}
+            # Get novel info from existing data atau gunakan data baru
+            novel_info = existing_data.get('novel_info', {}) if existing_data else {}
             
             # Create partial data structure
             partial_data = {
@@ -700,8 +749,11 @@ class LightNovelScraper:
             
             logger.info(f"📖 Processing novel {i}/{len(novels_to_process)}: {novel_title}")
             
+            # Load existing novel data untuk mendapatkan rating yang sudah ada
+            existing_data = self.load_existing_novel(novel_slug)
+            
             # Get detailed novel info (always refresh details)
-            detail = self.get_novel_detail(novel_slug)
+            detail = self.get_novel_detail(novel_slug, existing_data)
             if detail:
                 novel_data = {**novel, **detail}
             else:
@@ -710,9 +762,6 @@ class LightNovelScraper:
             # Update novels list with fresh data
             updated_novels_list = self.update_novel_in_list(updated_novels_list, novel_data)
             self.save_novels_to_json(updated_novels_list)
-            
-            # Load existing novel data for chapters
-            existing_data = self.load_existing_novel(novel_slug)
             
             # Get ALL chapters
             all_chapters = self.get_all_chapters_for_novel(novel_slug, existing_data)
@@ -740,10 +789,10 @@ def main():
     START_PAGE = 1
     MAX_PAGES = 1
     
-    print("🚀 Light Novel Scraper - SMART RESUME")
-    print("=====================================")
+    print("🚀 Light Novel Scraper - FIXED RATING VERSION")
+    print("=============================================")
     print(f"📄 Pages: {START_PAGE} to {MAX_PAGES}")
-    print("🎯 Will only process novels that need chapters")
+    print("🎯 Fixed rating extraction for detail pages")
     print("⏰ This may take a while...")
     print()
     
