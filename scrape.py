@@ -826,7 +826,7 @@ def main():
     
     # CONFIGURATION
     START_PAGE = 1
-    MAX_PAGES = 9
+    MAX_PAGES = 11
     
     print("🚀 Light Novel Scraper - FIXED RATING & PROCESS ORDER")
     print("====================================================")
